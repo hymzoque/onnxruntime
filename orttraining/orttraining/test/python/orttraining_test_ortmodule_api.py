@@ -3,7 +3,9 @@
 # orttraining_test_ortmodule_api.py
 
 import torch
+from transformers import AutoConfig, BertForSequenceClassification
 import pytest
+from unittest.mock import patch
 
 import onnxruntime
 from onnxruntime.training import ORTModule
@@ -239,3 +241,47 @@ def test_model_to_device_and_back_to_original(original_device, to_device):
     assert model._device == torch.device(original_device+':0')
     for _, parameter_value in model.named_parameters():
         assert parameter_value.device.type == original_device
+
+def test_gpu_reserved_memory_with_torch_no_grad():
+    device = 'cuda'
+
+    config = AutoConfig.from_pretrained(
+            "bert-base-uncased",
+            num_labels=2,
+            num_hidden_layers=1,
+            output_attentions = False,
+            output_hidden_states = False,
+    )
+
+    # Create a model and get the memory_reserved when torch.no_grad has been enabled
+    # before and after export
+    model_with_no_grad = BertForSequenceClassification.from_pretrained(
+        "bert-base-uncased",
+        config=config,
+    )
+    model_with_no_grad = ORTModule(model_with_no_grad)
+    model_with_no_grad.cuda()
+    mem_reserved_before_export = torch.cuda.memory_reserved(device)
+    x = torch.randint(0, 100, (32, 64), dtype=torch.long, device=device)
+    y = torch.randint(0, 100, (32, 64), dtype=torch.long, device=device)
+    z = torch.randint(0, 1, (32,), dtype=torch.long, device=device)
+    model_with_no_grad(x, y, None, None, None, None, z)
+    mem_reserved_after_export_with_torch_no_grad = torch.cuda.memory_reserved(device)
+    del model_with_no_grad
+    torch.cuda.empty_cache()
+
+    # Create another model and get the memory_reserved when torch.no_grad has not been enabled
+    # after export
+    model_without_no_grad = BertForSequenceClassification.from_pretrained(
+        "bert-base-uncased",
+        config=config,
+    )
+    model_without_no_grad = ORTModule(model_without_no_grad)
+    model_without_no_grad.cuda()
+    mem_reserved_after_export_without_torch_no_grad = 0
+    with patch('torch.no_grad'):
+        model_without_no_grad(x, y, None, None, None, None, z)
+        mem_reserved_after_export_without_torch_no_grad = torch.cuda.memory_reserved(device)
+
+    assert mem_reserved_after_export_with_torch_no_grad < mem_reserved_after_export_without_torch_no_grad
+    assert mem_reserved_before_export < mem_reserved_after_export_with_torch_no_grad
